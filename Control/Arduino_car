@@ -38,8 +38,8 @@ const int UP_SPEED = 1000;
 const int DOWN_SPEED = -1000;
 
 // ADC 층 감지 기준
-const int FLOOR_THRESHOLD = 500;
-const int FLOOR_RELEASE = 600;
+const int FLOOR_THRESHOLD = 100;
+const int FLOOR_RELEASE = 180;
 
 // 최대 이동 시간
 const unsigned long TIMEOUT_MS = 15000;
@@ -52,6 +52,16 @@ int targetFloor = 1;
 int moveFloor = 0;
 
 bool fault = false;
+
+// 2026.11.26 update ↓
+
+bool emergencyStop = false;
+
+// 시리얼 명령 수신 버퍼
+char serialBuffer[16];
+int serialIndex = 0;
+
+// 2026.1.26 update ↑
 
 // ========================================
 // DC 모터 제어 함수
@@ -138,10 +148,70 @@ void initialize_floor() {
     Serial.println(currentFloor);
 }
 
+// 2026.11.26 update
+// 긴급정지
+bool check_emergency_stop() {
+
+    while (Serial.available() > 0) {
+
+        char input = Serial.read();
+
+        // 줄바꿈 문자를 받으면 명령 처리
+        if (input == '\n' || input == '\r') {
+
+            serialBuffer[serialIndex] = '\0';
+
+            if (strcmp(serialBuffer, "STOP") == 0) {
+
+                emergencyStop = true;
+
+                // 두 모터 모두 정지
+                control_motor(MOTOR1_POS, MOTOR1_NEG, 0);
+                control_motor(MOTOR2_POS, MOTOR2_NEG, 0);
+
+                // 남은 이동 명령 취소
+                moveFloor = 0;
+
+                Serial.println("!!! EMERGENCY STOP !!!");
+                Serial.println("Elevator stopped.");
+                Serial.println("Position must be checked.");
+
+                serialIndex = 0;
+                return true;
+            }
+
+            // 처리 후 버퍼 초기화
+            serialIndex = 0;
+        }
+
+        // 버퍼에 문자 저장
+        else if (serialIndex < sizeof(serialBuffer) - 1) {
+
+            serialBuffer[serialIndex++] = input;
+        }
+
+        // 버퍼 초과 방지
+        else {
+
+            serialIndex = 0;
+        }
+    }
+
+    return emergencyStop;
+}
+// 긴급정지 2026.11.26 update
+
 // ========================================
 // 엘리베이터 상승 함수
+// 긴급정지 시리얼 명령 통합 2026.11.26
 // ========================================
 bool move_up() {
+
+    // 이미 긴급정지 상태라면 이동하지 않음
+    if (emergencyStop) {
+
+        return false;
+    }
 
     Serial.println("Moving Up");
 
@@ -155,7 +225,17 @@ bool move_up() {
 
     while (moveFloor > 0) {
 
+        // --------------------------------
+        // 긴급정지 명령 확인
+        // --------------------------------
+        if (check_emergency_stop()) {
+
+            return false;
+        }
+
+        // --------------------------------
         // 타임아웃 확인
+        // --------------------------------
         if (millis() - startTime >= TIMEOUT_MS) {
 
             return stop_with_error();
@@ -163,7 +243,9 @@ bool move_up() {
 
         int adcValue = analogRead(PIN_ADC);
 
+        // --------------------------------
         // 새로운 층 감지
+        // --------------------------------
         if (adcValue < FLOOR_THRESHOLD && !detected) {
 
             detected = true;
@@ -180,13 +262,17 @@ bool move_up() {
             Serial.println(moveFloor);
         }
 
+        // --------------------------------
         // 기존 층에서 벗어남
+        // --------------------------------
         else if (adcValue >= FLOOR_RELEASE) {
 
             detected = false;
         }
 
+        // --------------------------------
         // 디버깅 출력
+        // --------------------------------
         if (millis() - lastPrint >= 100) {
 
             lastPrint = millis();
@@ -204,17 +290,25 @@ bool move_up() {
         delay(10);
     }
 
+    // --------------------------------
+    // 이동 완료 후 모터 정지
+    // --------------------------------
     control_motor(MOTOR1_POS, MOTOR1_NEG, 0);
 
     Serial.println("Up Complete");
 
     return true;
 }
-
 // ========================================
 // 엘리베이터 하강 함수
 // ========================================
 bool move_down() {
+
+    // 이미 긴급정지 상태라면 이동하지 않음
+    if (emergencyStop) {
+
+        return false;
+    }
 
     Serial.println("Moving Down");
 
@@ -227,6 +321,12 @@ bool move_down() {
     control_motor(MOTOR1_POS, MOTOR1_NEG, DOWN_SPEED);
 
     while (moveFloor < 0) {
+
+        // 긴급정지 명령 확인
+        if (check_emergency_stop()) {
+
+            return false;
+        }
 
         // 타임아웃 확인
         if (millis() - startTime >= TIMEOUT_MS) {
@@ -326,6 +426,15 @@ void setup() {
 // 메인 반복문
 // ========================================
 void loop() {
+    // 긴급정지하면 모든 장비 동작 멈추기
+    if (emergencyStop) {
+
+        control_motor(MOTOR1_POS, MOTOR1_NEG, 0);
+        control_motor(MOTOR2_POS, MOTOR2_NEG, 0);
+
+        delay(100);
+        return;
+    }
 
     // 오류 발생 시 추가 동작 금지
     if (fault) {
